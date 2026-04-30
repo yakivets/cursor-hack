@@ -70,3 +70,6 @@ desktop.ini
 
 # cursor / claude / codex agent transcripts
 .cursor/agent-transcripts/
+
+# internal design / pitch / plan docs — kept local, not pushed to GitHub
+/docs/
