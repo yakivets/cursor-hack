@@ -49,14 +49,6 @@ The five-model line-up is deliberate: identical scenario, identical shocks, iden
 - **Best use of LLM models** — five different OpenAI models compete on the same task with deterministic ranking; the saved decision traces *are* the eval.
 - **Best use of Cursor** — the entire repo was built end-to-end inside Cursor with Composer agents.
 
-## Documentation
-
-- **[docs/value-and-pitch.md](docs/value-and-pitch.md)** — full pitch, framing, anticipated judge Q&A.
-- **[docs/architecture.md](docs/architecture.md)** — system architecture, data flow, state schema.
-- **[docs/game-design.md](docs/game-design.md)** — game mechanics, tools, formulas, balancing.
-- **[docs/agents.md](docs/agents.md)** — agent loop, 3-layer prompt design, narrator.
-- **[AGENTS.md](AGENTS.md)** — context file for Cursor / Claude / Codex coding assistants.
-
 ## License
 
 This is a hackathon project. No formal license; if you want to use any of it, get in touch.
