@@ -80,19 +80,23 @@ export default function HostGame({ state, onReset }: Props) {
           <div className="flex gap-2 overflow-x-auto shrink-0 pb-1">
             {Array.from({ length: 5 }).map((_, slot) => {
               const agent = state.agents[slot];
+              const player = state.players[slot];
               const model = modelForSlot(slot);
+              const name = player?.name ?? `Slot ${slot + 1}`;
               return (
                 <div
                   key={slot}
                   className="shrink-0 w-[180px] rounded-lg bg-zinc-900 ring-1 ring-zinc-800 p-3 font-mono text-sm"
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-zinc-500">SLOT {slot + 1}</span>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium text-zinc-100 truncate">
+                      {name}
+                    </span>
                     {agent && !agent.alive && (
-                      <span className="text-red-400">💀</span>
+                      <span className="text-red-400 shrink-0">💀</span>
                     )}
                   </div>
-                  <div className="text-xs text-zinc-400 truncate">{model}</div>
+                  <div className="text-[10px] text-zinc-500 truncate">{model}</div>
                   {agent ? (
                     <div className="mt-1 space-y-0.5">
                       <div>

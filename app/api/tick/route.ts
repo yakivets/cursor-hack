@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { getState, setState, pushHistory } from "@/lib/redis";
 import { LOG_CAP, type LogEntry, type GameState } from "@/lib/types";
-import { runTick, type AgentDecision } from "@/lib/sim/tick";
+import {
+  runTick,
+  applyEndOfGameSettlement,
+  type AgentDecision,
+} from "@/lib/sim/tick";
 import { policyAgent } from "@/lib/agents/policy";
 import { runAgentTick } from "@/lib/agents/loop";
 import { mulberry32 } from "@/lib/sim/rng";
@@ -120,18 +124,29 @@ export async function POST() {
     // ----- Phase transition -----
     if (result.ended) {
       state.phase = "finished";
-      if (!state.winnerId) {
-        const ranked = rankAgents(state.agents);
-        state.winnerId = ranked[0]?.playerId ?? null;
-        if (state.winnerId) {
-          const winner = state.agents.find((a) => a.playerId === state.winnerId);
-          state.log.push({
-            t: state.tickCount,
-            playerId: state.winnerId,
-            text: `🏆 slot ${(winner?.slot ?? 0) + 1} wins by lowest debt`,
-            kind: "win",
-          });
-        }
+      const hadInTickWinner = !!state.winnerId; // someone cleared debt mid-tick
+      // Final settlement: liquidate cash → debt for all alive agents BEFORE
+      // re-ranking. This is what produces a "true winner" — whoever has the
+      // lowest *effective* debt after their cash is applied. Skipped for
+      // anyone already at debt=0 (idempotent), so an in-tick winner is safe.
+      const settleLogs = applyEndOfGameSettlement(state);
+      state.log.push(...settleLogs);
+      // Re-rank with post-settlement numbers (alive first, then debt asc).
+      const ranked = rankAgents(state.agents);
+      state.winnerId = ranked[0]?.playerId ?? null;
+      // Only emit a fresh win banner if runTick didn't already do it
+      // (avoids "X cleared the debt" + "X got closest to zero" duplicate).
+      if (state.winnerId && !hadInTickWinner) {
+        const winner = state.agents.find((a) => a.playerId === state.winnerId);
+        const cleared = winner && winner.debtPence <= 0;
+        state.log.push({
+          t: state.tickCount,
+          playerId: state.winnerId,
+          text: cleared
+            ? `🏆 ${winnerName(state, state.winnerId)} cleared the debt`
+            : `🥈 ${winnerName(state, state.winnerId)} got closest to zero`,
+          kind: "win",
+        });
       }
       // Block 5: persist the eval-trace. Best-effort — never break the game.
       if (!state.gameId) state.gameId = cryptoUuid();
@@ -153,21 +168,24 @@ export async function POST() {
 
 async function finalize(state: GameState): Promise<NextResponse> {
   state.phase = "finished";
-  if (!state.winnerId) {
-    const ranked = rankAgents(state.agents);
-    state.winnerId = ranked[0]?.playerId ?? null;
-    if (state.winnerId) {
-      const winner = state.agents.find((a) => a.playerId === state.winnerId);
-      const entry: LogEntry = {
-        t: state.tickCount,
-        playerId: state.winnerId,
-        text: `🏁 time's up — slot ${(winner?.slot ?? 0) + 1} wins by lowest debt`,
-        kind: "win",
-      };
-      state.log.push(entry);
-      if (state.log.length > LOG_CAP) state.log = state.log.slice(-LOG_CAP);
-    }
+  const settleLogs = applyEndOfGameSettlement(state);
+  state.log.push(...settleLogs);
+  const ranked = rankAgents(state.agents);
+  state.winnerId = ranked[0]?.playerId ?? null;
+  if (state.winnerId) {
+    const winner = state.agents.find((a) => a.playerId === state.winnerId);
+    const cleared = winner && winner.debtPence <= 0;
+    const entry: LogEntry = {
+      t: state.tickCount,
+      playerId: state.winnerId,
+      text: cleared
+        ? `🏁 time's up — 🏆 ${winnerName(state, state.winnerId)} cleared the debt`
+        : `🏁 time's up — 🥈 ${winnerName(state, state.winnerId)} got closest to zero`,
+      kind: "win",
+    };
+    state.log.push(entry);
   }
+  if (state.log.length > LOG_CAP) state.log = state.log.slice(-LOG_CAP);
   if (!state.gameId) state.gameId = cryptoUuid();
   try {
     await pushHistory(buildHistoryEntry(state));
@@ -176,6 +194,13 @@ async function finalize(state: GameState): Promise<NextResponse> {
   }
   await setState(state);
   return NextResponse.json(state, { headers: NO_STORE });
+}
+
+function winnerName(state: GameState, playerId: string): string {
+  const player = state.players.find((p) => p.id === playerId);
+  if (player?.name) return player.name;
+  const slot = state.agents.find((a) => a.playerId === playerId)?.slot ?? 0;
+  return `slot ${slot + 1}`;
 }
 
 function rankAgents(

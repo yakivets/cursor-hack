@@ -12,8 +12,11 @@ const PERSONALITY_EMOJI: Record<PersonalityKind, string> = {
   diplomat: "🤝",
 };
 
-const formatGBP = (pence: number): string =>
-  `£${(pence / 100).toLocaleString("en-GB", { maximumFractionDigits: 0 })}`;
+const formatGBP = (pence: number): string => {
+  const sign = pence < 0 ? "-" : "";
+  const abs = Math.abs(pence) / 100;
+  return `${sign}£${abs.toLocaleString("en-GB", { maximumFractionDigits: 0 })}`;
+};
 
 interface Props {
   state: GameState;
@@ -21,8 +24,35 @@ interface Props {
 }
 
 export default function HostResults({ state, onReset }: Props) {
-  const winner = state.players.find((p) => p.id === state.winnerId);
+  const winnerPlayer = state.players.find((p) => p.id === state.winnerId);
   const winnerAgent = state.agents.find((a) => a.playerId === state.winnerId);
+  const winnerName =
+    winnerPlayer?.name ??
+    (winnerAgent ? `Slot ${winnerAgent.slot + 1}` : null);
+  const winnerCleared = !!winnerAgent && winnerAgent.debtPence <= 0;
+  const noOneAlive =
+    state.agents.length > 0 && state.agents.every((a) => !a.alive);
+
+  // Title: 🏆 if someone cleared, 🥈 if just closest-to-zero, 💀 only if
+  // literally everyone bankrupted.
+  let title: string;
+  if (winnerName && winnerCleared) {
+    title = `🏆 WINNER: ${winnerName}`;
+  } else if (winnerName) {
+    title = `🥈 BEST RESULT: ${winnerName}`;
+  } else if (noOneAlive) {
+    title = "💀 TOTAL COLLAPSE";
+  } else {
+    title = "🏁 GAME OVER";
+  }
+
+  const subline = (() => {
+    if (!winnerAgent) return null;
+    if (winnerCleared) {
+      return `${modelForSlot(winnerAgent.slot)} cleared the debt with ${formatGBP(winnerAgent.cashPence)} in the bank.`;
+    }
+    return `${modelForSlot(winnerAgent.slot)} got closest with £${(winnerAgent.debtPence / 100).toLocaleString("en-GB", { maximumFractionDigits: 0 })} of debt remaining after settlement.`;
+  })();
 
   const standings = state.agents
     .map((agent) => {
@@ -37,14 +67,11 @@ export default function HostResults({ state, onReset }: Props) {
   return (
     <div className="flex min-h-screen flex-col bg-zinc-950 text-zinc-100 p-8 gap-8 items-center">
       <h1 className="font-mono text-6xl font-bold text-center mt-8">
-        {winner
-          ? `🏆 WINNER: ${winner.name}`
-          : "💀 TOTAL COLLAPSE"}
+        {title}
       </h1>
-      {winner && winnerAgent && (
-        <div className="font-mono text-2xl text-zinc-400">
-          {modelForSlot(winnerAgent.slot)} cleared the debt with{" "}
-          {formatGBP(winnerAgent.cashPence)} in the bank.
+      {subline && (
+        <div className="font-mono text-xl text-zinc-400 text-center max-w-3xl">
+          {subline}
         </div>
       )}
 
@@ -52,8 +79,8 @@ export default function HostResults({ state, onReset }: Props) {
         <table className="w-full font-mono text-sm">
           <thead className="bg-zinc-800/50 text-zinc-400">
             <tr>
-              <th className="px-4 py-3 text-left">SLOT</th>
-              <th className="px-4 py-3 text-left">MODEL</th>
+              <th className="px-4 py-3 text-left">RANK</th>
+              <th className="px-4 py-3 text-left">PLAYER</th>
               <th className="px-4 py-3 text-left">PERSONALITY</th>
               <th className="px-4 py-3 text-right">CASH</th>
               <th className="px-4 py-3 text-right">DEBT</th>
@@ -61,12 +88,26 @@ export default function HostResults({ state, onReset }: Props) {
             </tr>
           </thead>
           <tbody>
-            {standings.map(({ agent, player }) => {
+            {standings.map(({ agent, player }, i) => {
               const personality = player?.config?.personality;
+              const name = player?.name ?? `Slot ${agent.slot + 1}`;
+              const isWinner = agent.playerId === state.winnerId;
               return (
-                <tr key={agent.playerId} className="border-t border-zinc-800">
-                  <td className="px-4 py-3">{agent.slot + 1}</td>
-                  <td className="px-4 py-3">{modelForSlot(agent.slot)}</td>
+                <tr
+                  key={agent.playerId}
+                  className={`border-t border-zinc-800 ${
+                    isWinner ? "bg-emerald-500/10" : ""
+                  }`}
+                >
+                  <td className="px-4 py-3 text-zinc-400">
+                    {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `#${i + 1}`}
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="font-medium">{name}</div>
+                    <div className="text-xs text-zinc-500">
+                      {modelForSlot(agent.slot)}
+                    </div>
+                  </td>
                   <td className="px-4 py-3">
                     {personality
                       ? `${PERSONALITY_EMOJI[personality]} ${personality}`
@@ -99,7 +140,6 @@ export default function HostResults({ state, onReset }: Props) {
       </div>
 
       {(() => {
-        // 3 funniest log lines, heuristic: longest narrator entries (action+shock).
         const candidates = state.log
           .filter((l) => l.kind === "action" || l.kind === "shock")
           .slice()

@@ -348,6 +348,7 @@ export function createSceneClass(
 
         let status = "";
         if (agent && !agent.alive) status = "💀";
+        else if (agent && player) status = player.name.slice(0, 14);
         else if (!agent && player && player.ready) status = "READY";
         else if (!agent && !player) status = "empty";
         actor.statusLabel.setText(status);

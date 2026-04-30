@@ -404,6 +404,36 @@ export function applyRecurring(
   return logs;
 }
 
+// ----- End-of-game settlement -----
+
+/**
+ * Final settlement: when the clock runs out, every alive agent's cash is
+ * automatically applied 1:1 against its remaining debt (think: liquidate to
+ * pay creditors). This produces a "true winner" — whoever finishes with the
+ * lowest *effective* debt, not just whoever happened to hold the most cash
+ * at the buzzer. Bankrupt agents and agents with no debt left are skipped.
+ *
+ * Idempotent — running it twice is a no-op once everyone is settled.
+ * Returns log entries for the settlement (one per agent that paid down).
+ */
+export function applyEndOfGameSettlement(state: GameState): LogEntry[] {
+  const logs: LogEntry[] = [];
+  for (const agent of state.agents) {
+    if (!agent.alive) continue;
+    if (agent.cashPence <= 0 || agent.debtPence <= 0) continue;
+    const apply = Math.min(agent.cashPence, agent.debtPence);
+    agent.cashPence -= apply;
+    agent.debtPence -= apply;
+    logs.push({
+      t: state.tickCount,
+      playerId: agent.playerId,
+      text: `💰 final settlement: paid £${Math.round(apply / 100).toLocaleString("en-GB")} cash against debt`,
+      kind: "system",
+    });
+  }
+  return logs;
+}
+
 // ----- checkWinner -----
 
 /**
