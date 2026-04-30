@@ -355,7 +355,50 @@ export default function PlayPage() {
                 <Stat label="Debt" value={`£${(myAgent.debtPence / 100).toFixed(0)}`} />
               </div>
             )}
-            <div className="pt-2">👀 Watch the screen!</div>
+            {/* Personal action log — only entries that hit THIS player's
+                agent (their actions, their shocks, their settlement). */}
+            {playerId && gameState && (() => {
+              const mine = gameState.log
+                .filter((l) => l.playerId === playerId)
+                .slice(-15)
+                .reverse(); // newest at top
+              if (mine.length === 0) {
+                return (
+                  <div className="text-xs text-muted-foreground italic pt-3">
+                    Your bot is thinking…
+                  </div>
+                );
+              }
+              return (
+                <div className="pt-3 text-left space-y-1">
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                    Your bot&apos;s log
+                  </div>
+                  <div className="max-h-72 overflow-y-auto rounded-md border bg-background/50 p-2 space-y-1">
+                    {mine.map((l, i) => (
+                      <div
+                        key={`${l.t}-${i}`}
+                        className={`text-[11px] leading-snug ${
+                          l.kind === "shock"
+                            ? "text-amber-600 dark:text-amber-300"
+                            : l.kind === "escalation"
+                              ? "text-yellow-700 dark:text-yellow-300 font-semibold"
+                              : l.kind === "win"
+                                ? "text-emerald-600 dark:text-emerald-300 font-semibold"
+                                : l.kind === "system"
+                                  ? "text-muted-foreground"
+                                  : "text-foreground"
+                        }`}
+                      >
+                        <span className="text-muted-foreground">[t{l.t}] </span>
+                        {l.text}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
+            <div className="pt-2">👀 Watch the big screen too!</div>
           </CardContent>
         </Card>
         <Toaster />
