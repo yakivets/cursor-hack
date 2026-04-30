@@ -1,0 +1,217 @@
+import { NextResponse } from "next/server";
+import { getState, setState, pushHistory } from "@/lib/redis";
+import { LOG_CAP, type LogEntry, type GameState } from "@/lib/types";
+import { runTick, type AgentDecision } from "@/lib/sim/tick";
+import { policyAgent } from "@/lib/agents/policy";
+import { runAgentTick } from "@/lib/agents/loop";
+import { mulberry32 } from "@/lib/sim/rng";
+import { narrateTick } from "@/lib/agents/narrator";
+
+export const dynamic = "force-dynamic";
+
+const NO_STORE = { "Cache-Control": "no-store" } as const;
+
+const LLM_ENABLED = process.env.OPENAI_API_KEY !== undefined && process.env.LLM_DISABLED !== "1";
+
+export async function POST() {
+  try {
+    const state = await getState();
+
+    if (state.phase !== "running") {
+      return NextResponse.json(
+        { error: `cannot tick in phase ${state.phase}` },
+        { status: 409, headers: NO_STORE },
+      );
+    }
+
+    const timeUp = state.endsAt !== null && Date.now() >= state.endsAt;
+    if (state.tickCount >= state.scenario.totalTicks || timeUp) {
+      return await finalize(state);
+    }
+
+    // Per-tick policy RNG, independent of the sim rng.
+    const policyRng = mulberry32(
+      (state.seed ^ 0xb33f_c0de ^ ((state.tickCount + 1) * 0x9e37_79b1)) >>> 0,
+    );
+
+    // ----- Build decisions: LLM with policy fallback (Block 2) -----
+    const aliveAgents = state.agents.filter((a) => a.alive);
+    let decisions: AgentDecision[];
+    const meta: { source: "llm" | "fallback"; reason?: string; latencyMs: number; playerId: string }[] = [];
+
+    if (LLM_ENABLED) {
+      const settled = await Promise.allSettled(
+        aliveAgents.map((a) => runAgentTick(a, state, policyRng)),
+      );
+      decisions = [];
+      settled.forEach((r, i) => {
+        const agent = aliveAgents[i];
+        if (r.status === "fulfilled") {
+          decisions.push(r.value.decision);
+          meta.push({
+            playerId: agent.playerId,
+            source: r.value.source,
+            reason: r.value.reason,
+            latencyMs: r.value.latencyMs,
+          });
+        } else {
+          // Promise.allSettled rarely rejects (runAgentTick swallows), but
+          // guard anyway.
+          const fallback = policyAgent(agent, state, policyRng);
+          decisions.push(fallback);
+          meta.push({
+            playerId: agent.playerId,
+            source: "fallback",
+            reason: "promise rejected",
+            latencyMs: 0,
+          });
+        }
+      });
+    } else {
+      decisions = aliveAgents.map((a) => policyAgent(a, state, policyRng));
+      meta.push(
+        ...aliveAgents.map((a) => ({
+          playerId: a.playerId,
+          source: "fallback" as const,
+          reason: "llm disabled",
+          latencyMs: 0,
+        })),
+      );
+    }
+
+    // ----- Run the deterministic tick -----
+    const result = runTick(state, decisions);
+
+    // ----- Narrator pass over action+shock logs (Block 3) -----
+    let finalLogs = result.newLogs;
+    if (LLM_ENABLED) {
+      try {
+        finalLogs = await narrateTick(result.newLogs, state);
+      } catch (err) {
+        console.error("narrator failed", err);
+      }
+    }
+
+    // ----- Surface fallback diagnostics in the log (one combined line) -----
+    // Reframe as "deferred to policy" — graceful degradation framing, not
+    // a stack trace. The LLM was busy; the agent's pre-set policy stepped in.
+    const fallbacks = meta.filter((m) => m.source === "fallback");
+    if (fallbacks.length > 0 && LLM_ENABLED) {
+      const slots = fallbacks
+        .map(
+          (m) =>
+            (state.agents.find((a) => a.playerId === m.playerId)?.slot ?? 0) + 1,
+        )
+        .sort((a, b) => a - b);
+      const slotList = slots.map((n) => `slot ${n}`).join(", ");
+      finalLogs.push({
+        t: state.tickCount,
+        playerId: null,
+        text: `📋 ${slotList} deferred to its policy (LLM busy)`,
+        kind: "system",
+      });
+    }
+
+    state.log.push(...finalLogs);
+    if (state.log.length > LOG_CAP) {
+      state.log = state.log.slice(-LOG_CAP);
+    }
+
+    // ----- Phase transition -----
+    if (result.ended) {
+      state.phase = "finished";
+      if (!state.winnerId) {
+        const ranked = rankAgents(state.agents);
+        state.winnerId = ranked[0]?.playerId ?? null;
+        if (state.winnerId) {
+          const winner = state.agents.find((a) => a.playerId === state.winnerId);
+          state.log.push({
+            t: state.tickCount,
+            playerId: state.winnerId,
+            text: `🏆 slot ${(winner?.slot ?? 0) + 1} wins by lowest debt`,
+            kind: "win",
+          });
+        }
+      }
+      // Block 5: persist the eval-trace. Best-effort — never break the game.
+      if (!state.gameId) state.gameId = cryptoUuid();
+      try {
+        await pushHistory(buildHistoryEntry(state));
+      } catch (err) {
+        console.error("pushHistory failed", err);
+      }
+    }
+
+    await setState(state);
+    return NextResponse.json(state, { headers: NO_STORE });
+  } catch (err) {
+    console.error("/api/tick error", err);
+    const message = err instanceof Error ? err.message : "unknown error";
+    return NextResponse.json({ error: message }, { status: 500, headers: NO_STORE });
+  }
+}
+
+async function finalize(state: GameState): Promise<NextResponse> {
+  state.phase = "finished";
+  if (!state.winnerId) {
+    const ranked = rankAgents(state.agents);
+    state.winnerId = ranked[0]?.playerId ?? null;
+    if (state.winnerId) {
+      const winner = state.agents.find((a) => a.playerId === state.winnerId);
+      const entry: LogEntry = {
+        t: state.tickCount,
+        playerId: state.winnerId,
+        text: `🏁 time's up — slot ${(winner?.slot ?? 0) + 1} wins by lowest debt`,
+        kind: "win",
+      };
+      state.log.push(entry);
+      if (state.log.length > LOG_CAP) state.log = state.log.slice(-LOG_CAP);
+    }
+  }
+  if (!state.gameId) state.gameId = cryptoUuid();
+  try {
+    await pushHistory(buildHistoryEntry(state));
+  } catch (err) {
+    console.error("pushHistory failed", err);
+  }
+  await setState(state);
+  return NextResponse.json(state, { headers: NO_STORE });
+}
+
+function rankAgents(
+  agents: import("@/lib/types").AgentRuntime[],
+): import("@/lib/types").AgentRuntime[] {
+  return [...agents].sort((a, b) => {
+    if (a.alive !== b.alive) return a.alive ? -1 : 1;
+    if (a.debtPence !== b.debtPence) return a.debtPence - b.debtPence;
+    return b.cashPence - a.cashPence;
+  });
+}
+
+function buildHistoryEntry(state: GameState): import("@/lib/redis").HistoryEntry {
+  return {
+    gameId: state.gameId ?? cryptoUuid(),
+    endedAt: Date.now(),
+    seed: state.seed,
+    scenario: state.scenario,
+    agents: state.agents.map((a) => ({
+      playerId: a.playerId,
+      slot: a.slot,
+      model: a.model,
+      cashPence: a.cashPence,
+      debtPence: a.debtPence,
+      alive: a.alive,
+      lastAction: a.lastAction,
+    })),
+    log: state.log,
+    winnerId: state.winnerId,
+    tickCount: state.tickCount,
+  };
+}
+
+function cryptoUuid(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `g_${Math.random().toString(36).slice(2, 10)}_${Date.now()}`;
+}
