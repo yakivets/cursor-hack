@@ -11,6 +11,7 @@ import type OpenAI from "openai";
 import type { AgentRuntime, ToolDef, ToolName } from "../types";
 import { TOOL_CATALOG } from "../sim/tools";
 import { capForAgent } from "./policy-card";
+import { costOf, impactOf, maxPayDownK } from "./tool-cost";
 
 const POUND = 100;
 const POUND_K = 1000 * POUND;
@@ -29,60 +30,6 @@ type JsonSchemaObject = {
   required: string[];
   additionalProperties: boolean;
 } & Record<string, unknown>;
-
-/** Up-front cash cost for affordability filtering. Mirrors lib/agents/policy.ts. */
-function costOf(name: ToolName, args: Record<string, unknown>): number {
-  switch (name) {
-    case "hire":
-      return 1000 * POUND;
-    case "fire":
-      return 500 * POUND;
-    case "launch_marketing_campaign":
-      return Number(args.budget ?? 0) * POUND;
-    case "close_sales_deal":
-      if (args.effort === "small") return 200 * POUND;
-      if (args.effort === "medium") return 1000 * POUND;
-      if (args.effort === "big") return 5000 * POUND;
-      return 0;
-    case "pay_down_debt":
-      return Number(args.amountK ?? 0) * POUND_K;
-    case "risky_bet":
-      return Number(args.amountK ?? 0) * POUND_K;
-    default:
-      return 0;
-  }
-}
-
-/** Max |Δcash| or |Δdebt| this variant could produce — used for the £-cap
- *  filter so the LLM never sees variants that would just get escalated. */
-function impactOf(name: ToolName, args: Record<string, unknown>): number {
-  const cost = costOf(name, args);
-  switch (name) {
-    case "take_loan": {
-      const k = Number(args.amountK ?? 0);
-      // |Δcash| = k*1000, |Δdebt| = k*1050 → debt is the bigger swing
-      return Math.round(k * 1.05 * POUND_K);
-    }
-    case "factor_invoices": {
-      const k = Number(args.amountK ?? 0);
-      // 85% cash gain — that's the materializing money move
-      return Math.round(k * 0.85 * POUND_K);
-    }
-    case "delay_supplier_payment":
-      return 3000 * POUND;
-    case "aggressive_collections":
-      return 2000 * POUND;
-    case "close_sales_deal": {
-      // Won-payout dwarfs the cost; use payout as the impact signal.
-      if (args.effort === "small") return 2000 * POUND;
-      if (args.effort === "medium") return 8000 * POUND;
-      if (args.effort === "big") return 40000 * POUND;
-      return cost;
-    }
-    default:
-      return cost;
-  }
-}
 
 function buildSchemaFromVariants(
   def: ToolDef,
@@ -129,11 +76,14 @@ export function buildToolsForAgent(
     if (def.minRisk !== undefined && agent.config.risk < def.minRisk) continue;
     if (def.name === "fire" && headcount === 0) continue;
 
-    const affordableVariants = def.argVariants.filter((args) => {
+    let affordableVariants = def.argVariants.filter((args) => {
+      // wait is always free + always legal — exempt from cost/cap/cash gates
+      // (cashPence can be negative briefly between ticks, which would
+      //  otherwise filter wait out: 0 > -X = true).
+      if (def.name === "wait") return true;
       const cost = costOf(def.name, args);
       if (cost > agent.cashPence) return false;
       // Don't propose over-cap variants — they'd be escalated by tick.ts.
-      // `impactOf` matches what `applyAction` measures: max(|Δcash|, |Δdebt|).
       if (impactOf(def.name, args) > cap) return false;
       if (def.name === "hire" && agent.cashPence - cost < reserveForHire) return false;
       if (def.name === "risky_bet" && cost * 2 > agent.cashPence) return false;
@@ -148,6 +98,16 @@ export function buildToolsForAgent(
       }
       return true;
     });
+
+    // Cap-fitting pay_down_debt synthesis: at low Risk dials, the smallest
+    // catalog variant (£5k) can exceed the cap, leaving the agent unable
+    // to ever offer the only winning move. Synthesise a cap/cash/debt-
+    // bounded amountK so the LLM always has a legal way to chip away.
+    // tools.ts's pay_down_debt handler accepts any positive amountK.
+    if (def.name === "pay_down_debt" && affordableVariants.length === 0) {
+      const synth = maxPayDownK(agent.cashPence, agent.debtPence, cap);
+      if (synth >= 1) affordableVariants = [{ amountK: synth }];
+    }
 
     if (affordableVariants.length === 0 && def.name !== "wait") continue;
 

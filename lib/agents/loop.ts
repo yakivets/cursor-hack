@@ -70,7 +70,11 @@ export async function runAgentTick(
       ],
       tools,
       tool_choice: "auto",
-      max_completion_tokens: 200,
+      // 400 not 200: gpt-5 reasoning tokens count against this budget even
+      // at reasoning_effort=minimal, and 200 was occasionally truncating
+      // the tool call → no tool_calls in response → silent fallback that
+      // user couldn't tell apart from a real "wait" decision.
+      max_completion_tokens: 400,
     };
     // gpt-5 family burns 2-10s on reasoning by default. "minimal" cuts that
     // to ~1s. Non-reasoning models reject this param so we only set it for

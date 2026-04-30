@@ -165,9 +165,9 @@ RECENT EVENTS
 ${renderRecentLog(state, agent.playerId)}
 
 RULES
-- Each tick, call exactly ONE tool. If nothing makes sense, call \`wait\`.
-- pay_down_debt is the ONLY way to reduce debt. Win = debt at zero with cash > 0.
-- Only legal tools are offered. If you see a tool, you can use it.
+- Each tick, call exactly ONE tool. PREFER ACTION every tick — only call \`wait\` if every offered tool would clearly hurt your position. Inaction is rarely the right move; the clock is bleeding interest.
+- pay_down_debt is the ONLY way to reduce debt. Win = debt at zero with cash > 0. If pay_down_debt is offered, it is almost always worth using.
+- Only legal tools are offered. If you see a tool, you can use it — the legality filter has already handled cooldowns, affordability, and policy caps.
 - Reflect on YOUR ACTION HISTORY. If something repeatedly lost money, try a DIFFERENT tool.
 - Stay in character.`;
 }

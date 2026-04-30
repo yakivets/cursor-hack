@@ -30,35 +30,12 @@ import type { Rng } from "../sim/rng";
 import type { AgentDecision } from "../sim/tick";
 import { TOOL_CATALOG } from "../sim/tools";
 import { capForAgent } from "./policy-card";
+import { costOf, impactOf, maxPayDownK } from "./tool-cost";
 
 // ---------- Money math ----------
 // Mirror the constants used in `lib/sim/tools.ts` so we can't drift.
 const POUND = 100; // 1 GBP = 100 pence
 const POUND_K = 1000 * POUND; // £1,000 = 100,000 pence
-
-// ---------- Affordability ----------
-
-/** Up-front cash cost for each tool variant. Anything missing here is free
- *  (take_loan, factor_invoices, cut_expense, adjust_pricing, ethics shortcuts,
- *  negotiate_with_creditor, wait). Keep in sync with `lib/sim/tools.ts`. */
-const COST_PENCE: Partial<Record<ToolName, (args: Record<string, unknown>) => number>> = {
-  hire: () => 1000 * POUND,
-  fire: () => 500 * POUND,
-  launch_marketing_campaign: (a) => Number(a.budget ?? 0) * POUND,
-  close_sales_deal: (a) => {
-    const e = a.effort;
-    if (e === "small") return 200 * POUND;
-    if (e === "medium") return 1000 * POUND;
-    if (e === "big") return 5000 * POUND;
-    return 0;
-  },
-  pay_down_debt: (a) => Number(a.amountK ?? 0) * POUND_K,
-  risky_bet: (a) => Number(a.amountK ?? 0) * POUND_K,
-};
-
-function costOf(name: ToolName, args: Record<string, unknown>): number {
-  return COST_PENCE[name]?.(args) ?? 0;
-}
 
 // ---------- Legality filter ----------
 
@@ -86,15 +63,26 @@ function legalCandidates(agent: AgentRuntime, decisionTick: number): Candidate[]
     // Fire only if we have someone to fire
     if (def.name === "fire" && headcount === 0) continue;
 
+    // wait is always legal — emit a single candidate and skip the rest.
+    // (Without this, a negative cashPence makes `cost > cashPence` true
+    //  even at cost=0, which would filter wait out of the candidate pool.)
+    if (def.name === "wait") {
+      out.push({ def, args: {} });
+      continue;
+    }
+
+    let pushedFromCatalog = false;
+
     for (const args of def.argVariants) {
       const cost = costOf(def.name, args);
 
       // Basic affordability
       if (cost > agent.cashPence) continue;
 
-      // £-threshold policy gate — don't propose over-cap actions.
-      // (tick.ts will also escalate any that slip through this filter.)
-      if (def.name !== "wait" && cost > cap) continue;
+      // £-threshold policy gate — must match tick.ts's escalation rule
+      // (it measures impactOf, not raw cost), or the policy will propose
+      // moves that immediately get blocked.
+      if (impactOf(def.name, args) > cap) continue;
 
       // Don't hire if we can't cover ~5 ticks of payroll
       if (def.name === "hire" && agent.cashPence - cost < reserveForHire) continue;
@@ -116,6 +104,15 @@ function legalCandidates(agent: AgentRuntime, decisionTick: number): Candidate[]
       }
 
       out.push({ def, args });
+      pushedFromCatalog = true;
+    }
+
+    // Cap-fitting pay_down_debt synthesis — same fallback as the LLM
+    // schema in tools-schema.ts: at low Risk dials no catalog variant
+    // fits the cap, but the handler accepts any positive amountK.
+    if (def.name === "pay_down_debt" && !pushedFromCatalog) {
+      const synth = maxPayDownK(agent.cashPence, agent.debtPence, cap);
+      if (synth >= 1) out.push({ def, args: { amountK: synth } });
     }
   }
   return out;

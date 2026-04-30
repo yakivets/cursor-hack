@@ -41,7 +41,13 @@ export async function POST() {
     // ----- Build decisions: LLM with policy fallback (Block 2) -----
     const aliveAgents = state.agents.filter((a) => a.alive);
     let decisions: AgentDecision[];
-    const meta: { source: "llm" | "fallback"; reason?: string; latencyMs: number; playerId: string }[] = [];
+    const meta: {
+      source: "llm" | "fallback";
+      reason?: string;
+      latencyMs: number;
+      playerId: string;
+      tool?: string;
+    }[] = [];
 
     if (LLM_ENABLED) {
       const settled = await Promise.allSettled(
@@ -57,6 +63,7 @@ export async function POST() {
             source: r.value.source,
             reason: r.value.reason,
             latencyMs: r.value.latencyMs,
+            tool: r.value.decision.tool,
           });
         } else {
           // Promise.allSettled rarely rejects (runAgentTick swallows), but
@@ -68,17 +75,19 @@ export async function POST() {
             source: "fallback",
             reason: "promise rejected",
             latencyMs: 0,
+            tool: fallback.tool,
           });
         }
       });
     } else {
       decisions = aliveAgents.map((a) => policyAgent(a, state, policyRng));
       meta.push(
-        ...aliveAgents.map((a) => ({
+        ...aliveAgents.map((a, i) => ({
           playerId: a.playerId,
           source: "fallback" as const,
           reason: "llm disabled",
           latencyMs: 0,
+          tool: decisions[i].tool,
         })),
       );
     }
@@ -112,6 +121,29 @@ export async function POST() {
         t: state.tickCount,
         playerId: null,
         text: `📋 ${slotList} deferred to its policy (LLM busy)`,
+        kind: "system",
+      });
+    }
+
+    // ----- Distinguish LLM-chose-wait from fallback-wait in the log -----
+    // Without this, both produced an identical "🤔 thinking…" line, so a
+    // model that legitimately bailed (no good move) was indistinguishable
+    // from a silent timeout. This per-tool meta makes the choice visible.
+    const intentionalHolds = meta.filter(
+      (m) => m.source === "llm" && m.tool === "wait",
+    );
+    if (intentionalHolds.length > 0) {
+      const slots = intentionalHolds
+        .map(
+          (m) =>
+            (state.agents.find((a) => a.playerId === m.playerId)?.slot ?? 0) + 1,
+        )
+        .sort((a, b) => a - b);
+      const slotList = slots.map((n) => `slot ${n}`).join(", ");
+      finalLogs.push({
+        t: state.tickCount,
+        playerId: null,
+        text: `⏸️ ${slotList} chose to hold this tick`,
         kind: "system",
       });
     }
