@@ -45,9 +45,30 @@ export default function HostGame({ state, onReset }: Props) {
 
   const remaining = state.endsAt ? state.endsAt - now : 0;
   const recentLog = state.log.slice(-30);
+  const interceptCount = state.log.filter((l) => l.kind === "escalation").length;
 
   return (
     <div className="flex h-screen flex-col bg-zinc-950 text-zinc-100 p-4 gap-3 overflow-hidden">
+      {/* Track-01 framing strip — constant on-camera reinforcement of the
+          HITL angle + a live count of policy interceptions for the demo. */}
+      <div className="flex items-center justify-between font-mono text-[11px] uppercase tracking-wider text-zinc-400 bg-zinc-900/60 ring-1 ring-zinc-800 rounded px-3 py-1.5">
+        <span>
+          <span className="text-emerald-400">Track 01</span>
+          <span className="text-zinc-600"> · </span>
+          Money Movement
+          <span className="text-zinc-600"> · </span>
+          Human-out-of-the-loop
+        </span>
+        <span
+          className={
+            interceptCount > 0
+              ? "text-yellow-300 font-semibold"
+              : "text-zinc-500"
+          }
+        >
+          🛡️ POLICY INTERCEPTS: {interceptCount}
+        </span>
+      </div>
       <header className="flex items-center justify-between font-mono">
         <div className="text-2xl">
           <span className="text-zinc-500">PHASE </span>
